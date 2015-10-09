@@ -1,7 +1,7 @@
 require 'spec_helper'
 require "logstash/filters/example"
 
-describe LogStash::Filters::Example do
+describe LogStash::Filters::Sqlstream do
   describe "Set to Hello World" do
     let(:config) do <<-CONFIG
       filter {
