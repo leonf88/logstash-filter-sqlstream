@@ -3,7 +3,6 @@ require "logstash/filters/base"
 require "logstash/namespace"
 require "logstash/environment"
 require "logstash/patterns/core"
-require "socket"
 require "json"
 require "set"
 
@@ -15,25 +14,12 @@ class LogStash::Filters::Sqlstream < LogStash::Filters::Base
 
   # Setting the config_name here is required. This is how you
   # configure this filter from your Logstash config.
-  #
-  # filter {
-  #   sqlite {
-  #     # common config
-  #     time_window_seconds => 5  (optional)
-  #     rows_window => 10      (optional)
-  #     match => { "message" => "%{IP:client} %{WORD:method} %{URIPATHPARAM:request} %{NUMBER:bytes} %{NUMBER:duration}" }  (required)
-  #     output_select => "client, method"       (required)
-  #     output_group_by => "duration"            (optional)
-  #
-  #     # sqlite jdbc config
-  #
-  #   }
-  # }
-  #
+
   config_name "sqlstream"
 
-
+  # the internal table name
   SINCE_TABLE = :since_table
+
   DEFAULT_ROWS_WINDOW = 5
   DEFAULT_TIME_WINDOW_SECONDS = 0
   # @@table_primary_key = "Internal_SQL_Id_"
@@ -46,10 +32,14 @@ class LogStash::Filters::Sqlstream < LogStash::Filters::Base
   # Call the filter flush method at regular interval. (Optional)
   config :periodic_flush, :validate => :boolean, :default => true
 
+  # database config
+
+  # Column names which is extract from the message. This will be used for CREATE TABLE
   config :table_column_names, :validate => :array, :required => true, :default => []
 
   config :output_query, :validate => :string, :required => true
 
+  # Column alias names of the output_query clause. These will be added as fields into the event object.
   config :output_column_names, :validate => :array, :default => []
 
   config :table_primary_key, :validate => :string, :default => "Internal_SQL_Id_"
@@ -61,8 +51,6 @@ class LogStash::Filters::Sqlstream < LogStash::Filters::Base
   # config :output_group_by, :validate => :string, :required => true, :default => nil
   # config :output_where, :validate => :string, :required => true, :default => nil
   # config :insert_select_cols, :validate => :array, :default => []
-
-  # Sqlite config
 
   # once database_path is nil, use memory mode as default.
   config :database_path, :validate => :string, :default => nil
@@ -109,6 +97,14 @@ class LogStash::Filters::Sqlstream < LogStash::Filters::Base
     if (@time_window_seconds > 0 and ! @periodic_flush)
       @periodic_flush = true
       @logger.warn("reset the periodic_flush to true, because of the time window is enable.")
+    elsif (@time_window_seconds == 0 and @periodic_flush)
+      @periodic_flush = false
+      @logger.warn("reset the periodic_flush to false, because of the time window is disable.")
+    end
+
+    if (@time_window_seconds ==0) and (@rows_window == 0)
+      @rows_window = 1
+      @logger.warn("Both of time window and rows window are disable, set the rows window as default 1, make sure output every row.")
     end
 
     # if not @memory and not @database_path
