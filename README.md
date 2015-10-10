@@ -6,17 +6,17 @@ It is owned by HoneycombData. If you have any question, you can contact `chcdlf@
 
 ## Documents
 
-This filter is used for parse the input records to structured data and provide stream-sql support.
+This filter is used for parsing the input messages to structured data and providing stream-sql support.
 
-Firstly, it parses the records in the Grok way and generate several new fields which may be inserted in the database with lightweight local sql engine, e.g. SQLite3.
+Firstly, it parses the records in the Grok way and generates several new fields which may be inserted in the database with lightweight local sql engine, e.g. SQLite3.
 Then, the filter will select the database according to the user-defined query.
-The records selected from the database finally generate new events and passed to the next component in Logstash.
-The generated event is based on the original event which has be serialized into the database in processing insert.
+The records selected from the database finally are converted to new events and passed to the next component in Logstash.
+The generated event is based on the original event which has been serialized into the database when processing insert.
 
-When the query will group by several records (say m recs), and generate new events (say n events, m != n).
+When the query with group_by operation needs to aggregate several records (say m recs), and generate new events (say n events, m != n).
 The new event is based on the serialized data selected from database, which may be the latest one.
 
-We have three reserved words in the database, e.g.
+We have three reserved words in the query, e.g.
 
 * %{INTERNAL_DATA_BLOB_COL} => the column which is used to store the serialized event
 * %{INTERNAL_TABLE} => the table name
@@ -77,10 +77,10 @@ filter {
         table_column_names => ["client", "method", "request", "bytes", "duration"]
 
 #       output_column_names => ["client", "method", "duration"]
-#       output_query => "select %{INTERNAL_DATA_BLOB_COL}, client, method, duration from %{INTERNAL_TABLE} where %{INTERNAL_PRIMARY_KEY} = 0"
+#       output_query => "select %{INTERNAL_DATA_BLOB_COL}, `client`, `method`, `duration` from %{INTERNAL_TABLE} where %{INTERNAL_PRIMARY_KEY} = 0"
 
         output_column_names => ["NumberOfMethod"]
-        output_query => "select %{INTERNAL_DATA_BLOB_COL}, count(method) as NumberOfMethod from %{INTERNAL_TABLE} group by client"
+        output_query => "select %{INTERNAL_DATA_BLOB_COL}, count(method) as `NumberOfMethod` from %{INTERNAL_TABLE} group by `client`"
     }
 }
 ```
