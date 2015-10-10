@@ -37,7 +37,7 @@ class LogStash::Filters::Sqlstream < LogStash::Filters::Base
   # Column names which is extract from the message. This will be used for CREATE TABLE
   config :table_column_names, :validate => :array, :required => true, :default => []
 
-  config :output_query, :validate => :string, :required => true
+  config :output_query, :validate => :string, :required => true, :default => "select %{INTERNAL_DATA_BLOB_COL} from %{INTERNAL_TABLE}"
 
   # Column alias names of the output_query clause. These will be added as fields into the event object.
   config :output_column_names, :validate => :array, :default => []
@@ -84,6 +84,12 @@ class LogStash::Filters::Sqlstream < LogStash::Filters::Base
   public
   def initialize(params)
     super(params)
+
+    # TODO it is better to rethink the time window and row window strategy
+    # Right now, the strategy is that the time window and the periodic flush are always enable and disable simultaneously
+    # Once the time window and row window are both disable, to make sure output each input event,
+    # the row window will be reset to 1 and keep the time window disable. This could be optimized by
+    # bypassing the database, which means return the event directly.
     if @time_window_seconds < 0
       @logger.warn("time_window_seconds can not be negative, set the time_window_seconds to default #{DEFAULT_TIME_WINDOW_SECONDS}.")
       @time_window_seconds = DEFAULT_TIME_WINDOW_SECONDS
