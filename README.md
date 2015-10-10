@@ -20,15 +20,15 @@ We have three reserved words in the database, e.g.
 
 * %{INTERNAL_DATA_BLOB_COL} => the column which is used to store the serialized event
 * %{INTERNAL_TABLE} => the table name
-* %{INTERNAL_PRIMARY_KEY} =>
+* %{INTERNAL_PRIMARY_KEY} => the internal primary key of each record
 
 So, the simplest query should be like
 
-    "select %{INTERNAL_DATA_BLOB_COL} from %{INTERNAL_TABLE}"
+    select %{INTERNAL_DATA_BLOB_COL} from %{INTERNAL_TABLE}
 
 !!!When user define the self-query, the column field `%{INTERNAL_DATA_BLOB_COL}` should be remained. The query may looks like:
 
-    "select %{INTERNAL_DATA_BLOB_COL}, col1, col2 from %{INTERNAL_TABLE} where ... group by ..."
+    select %{INTERNAL_DATA_BLOB_COL}, col1 as alias1 from %{INTERNAL_TABLE} where ... group by ...
 
 ## Usage
 
@@ -57,6 +57,8 @@ filter {
     }
 }
 ```
+
+Example
 
 ```
 filter {

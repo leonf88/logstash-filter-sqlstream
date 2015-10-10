@@ -106,7 +106,6 @@ class LogStash::Filters::Sqlstream < LogStash::Filters::Base
       @rows_window = DEFAULT_ROWS_WINDOW
     end
 
-    print @time_window_seconds
     if (@time_window_seconds > 0 and ! @periodic_flush)
       @periodic_flush = true
       @logger.warn("reset the periodic_flush to true, because of the time window is enable.")
