@@ -3,6 +3,7 @@ require "logstash/filters/base"
 require "logstash/namespace"
 require "logstash/environment"
 require "logstash/patterns/core"
+require "socket"
 require "json"
 require "set"
 
@@ -18,12 +19,11 @@ class LogStash::Filters::Sqlstream < LogStash::Filters::Base
   # filter {
   #   sqlite {
   #     # common config
-  #     memory => true            (optional)
   #     time_window_seconds => 5  (optional)
-  #     records_window => 10      (optional)
+  #     rows_window => 10      (optional)
   #     match => { "message" => "%{IP:client} %{WORD:method} %{URIPATHPARAM:request} %{NUMBER:bytes} %{NUMBER:duration}" }  (required)
   #     output_select => "client, method"       (required)
-  #     output_groupby => "duration"            (optional)
+  #     output_group_by => "duration"            (optional)
   #
   #     # sqlite jdbc config
   #
@@ -32,29 +32,41 @@ class LogStash::Filters::Sqlstream < LogStash::Filters::Base
   #
   config_name "sqlstream"
 
-  config :time_window_seconds, :validate => :number, :default => 5
 
-  config :rows_window, :validate => :number, :default => 10
+  SINCE_TABLE = :since_table
+  DEFAULT_ROWS_WINDOW = 5
+  DEFAULT_TIME_WINDOW_SECONDS = 0
+  # @@table_primary_key = "Internal_SQL_Id_"
+  # @@internal_data_blob_col = "Internal_SQL_Serialized_Data_"
 
-  config :output_select, :validate => :array, :required => true, :default => []
+  config :time_window_seconds, :validate => :number, :default => DEFAULT_TIME_WINDOW_SECONDS
 
-  config :output_groupby, :validate => :string, :required => true, :default => nil
+  config :rows_window, :validate => :number, :default => DEFAULT_ROWS_WINDOW
 
   # Call the filter flush method at regular interval. (Optional)
   config :periodic_flush, :validate => :boolean, :default => true
 
-  # Sqlite config
-  config :memory, :validate => :boolean, :default => false
+  config :table_column_names, :validate => :array, :required => true, :default => []
 
-  config :db_path, :validate => :string, :default => nil
+  config :output_query, :validate => :string, :required => true
+
+  config :output_column_names, :validate => :array, :default => []
+
+  config :table_primary_key, :validate => :string, :default => "Internal_SQL_Id_"
+
+  config :internal_data_blob_col, :validate => :string, :default => "Internal_SQL_Serialized_Data_"
 
   # config :table_name, :validate => :string, :required => true, :default => "since_table"
+  # config :output_select, :validate => :array, :required => true, :default => []
+  # config :output_group_by, :validate => :string, :required => true, :default => nil
+  # config :output_where, :validate => :string, :required => true, :default => nil
+  # config :insert_select_cols, :validate => :array, :default => []
 
-  config :table_cols, :validate => :array, :required => true, :default => []
+  # Sqlite config
 
-  config :insert_select_cols, :validate => :array, :default => []
+  # once database_path is nil, use memory mode as default.
+  config :database_path, :validate => :string, :default => nil
 
-  SINCE_TABLE = :since_table
   ################################
   # Grok config
   ################################
@@ -84,18 +96,37 @@ class LogStash::Filters::Sqlstream < LogStash::Filters::Base
   public
   def initialize(params)
     super(params)
-    if not @memory and not @db_path
-      @logger.error("Need to either set memory => true, or a valid db_path.")
-      teardown
+    if @time_window_seconds < 0
+      @logger.warn("time_window_seconds can not be negative, set the time_window_seconds to default #{DEFAULT_TIME_WINDOW_SECONDS}.")
+      @time_window_seconds = DEFAULT_TIME_WINDOW_SECONDS
     end
 
-    if @output_groupby and (not @time_window_seconds and not @records_window)
-      @logger.error("When groupby is set, need to also set time_window_seconds or row_window.")
-      teardown
+    if @rows_window < 0
+      @logger.warn("rows_window can not be negative, set the rows_window to default #{DEFAULT_ROWS_WINDOW}.")
+      @rows_window = DEFAULT_ROWS_WINDOW
     end
+
+    print @time_window_seconds
+    if (@time_window_seconds > 0 and ! @periodic_flush)
+      @periodic_flush = true
+      @logger.warn("reset the periodic_flush to true, because of the time window is enable.")
+    end
+
+    # if not @memory and not @database_path
+    #   @logger.error("Need to either set memory => true, or a valid database_path.")
+    #   teardown
+    # end
+
+    # if @output_group_by and (not @time_window_seconds and not @rows_window)
+    #   @logger.error("When groupby is set, need to also set time_window_seconds or row_window.")
+    #   teardown
+    # end
+
+    # TODO check the query sql is validate
+
     uuid = SecureRandom.uuid
-#   @table_primary_key = @table_primary_key + uuid
-#   @internal_data_blob_col = @internal_data_blob_col + uuid
+    @table_primary_key = @table_primary_key + uuid
+    @internal_data_blob_col = @internal_data_blob_col + uuid
   end
 
   public
@@ -110,14 +141,14 @@ class LogStash::Filters::Sqlstream < LogStash::Filters::Base
     # Have @@patterns_path show first. Last-in pattern definitions win; this
     # will let folks redefine built-in patterns at runtime.
     @patterns_dir = @@patterns_path.to_a + @patterns_dir
-    @logger.info? and @logger.info("Grok patterns path", :patterns_dir => @patterns_dir)
+    @logger.info? and @logger.info("patterns path", :patterns_dir => @patterns_dir)
     @patterns_dir.each do |path|
       if File.directory?(path)
         path = File.join(path, "*")
       end
 
       Dir.glob(path).each do |file|
-        @logger.info? and @logger.info("Grok loading patterns from file", :path => file)
+        @logger.info? and @logger.info("loading patterns from file", :path => file)
         @patternfiles << file
       end
     end
@@ -129,7 +160,7 @@ class LogStash::Filters::Sqlstream < LogStash::Filters::Base
     @match.each do |field, patterns|
       patterns = [patterns] if patterns.is_a?(String)
 
-      @logger.info? and @logger.info("Grok compile", :field => field, :patterns => patterns)
+      @logger.info? and @logger.info("pattern compile", :field => field, :patterns => patterns)
       patterns.each do |pattern|
         @logger.debug? and @logger.debug("regexp: #{@type}/#{field}", :pattern => pattern)
         grok = Grok.new
@@ -141,52 +172,59 @@ class LogStash::Filters::Sqlstream < LogStash::Filters::Base
     end # @match.each
 
     # add sqlite support
-
-    if @memory
-      # TODO => LoadError: no such file to load -- sqlite3
-      @db = Sequel.sqlite
+    if @database_path.nil?
+      # use the JDBC adapter to connect to sqlite
+      # Because of JRuby does not support the native SQLite3
+      # very well, we can not use `Sequel.sqlite` here.
+      @db = Sequel.connect("jdbc:sqlite::memory:")
     else
-      @db = Sequel.connect("jdbc:sqlite:#{@db_path}")
+      @db = Sequel.connect("jdbc:sqlite:#{@database_path}")
     end
 
-    # TODO handle table_cols is empty
+    internal_primary_key = @table_primary_key.to_sym
+    internal_data = @internal_data_blob_col.to_sym
+
     @db.create_table!(SINCE_TABLE) do
-      primary_key :id
+      primary_key internal_primary_key
+      String internal_data, :text => true # used to cache the json data of the event
     end
 
-    @table_cols.each do |col_name|
-      @db.add_column SINCE_TABLE, col_name, String, :text => true
+    @table_column_names.each do |col_name|
+      @db.add_column SINCE_TABLE, col_name.to_sym, String, :text => true
     end
+
+    @output_column_names << @internal_data_blob_col
+
+    # output_select = "`" + @output_select.join("`,`") + "`"
+    # @output_query = "SELECT #{output_select} FROM #{SINCE_TABLE}"
+    #
+    # if @output_where
+    #   @output_query = @output_query + " WHERE #{@output_where}"
+    # end
+    #
+    # if @output_group_by
+    #   @output_query = @output_query + " GROUP BY #{@output_group_by}"
+    # end
+
+    # TODO we use the replacement to construct the query. Is it really the good for us?
+    @output_query = @output_query.sub("%{INTERAL_DATA_BLOB_COL}", "`#{@internal_data_blob_col}`")
+    @output_query = @output_query.sub("%{INTERNAL_TABLE}", "`#{SINCE_TABLE}`")
+    @output_query = @output_query.sub("%{INTERAL_PRIMARY_KEY}", "`#{@table_primary_key}`")
+
+    @logger.debug("sql query: #{@output_query}")
 
     @table = @db[SINCE_TABLE]
     @rows_since_last_flush = 0
+    @last_flush_sec = Time.now.to_i
 
-    # p @table.insert_sql([1, "hello", "a", "b", "c", "d", "e"])
-    # @table.insert([1, "hello", "a", "b", "c", "d", "e"])
-    # p @table.all
-
-    # tbl = :test
-    # @db.create_table!(tbl) do
-    #   primary_key :id
-    #   String :message, :text => true
-    # end
-    #
-    # @db[tbl].insert([1, "hello"])
-    # p @db[tbl].all
-  end
-
-  # def register
-
-  # TODO why not use the default
-  # public
-  # def multi_filter(events)
-  # end
+  end # def register
 
   public
   def filter(event)
     return unless filter?(event)
 
     matched = false
+    done = false
 
     @logger.debug? and @logger.debug("Running sql stream filter", :event => event);
     @patterns.each do |field, groks|
@@ -199,11 +237,12 @@ class LogStash::Filters::Sqlstream < LogStash::Filters::Base
 
     if matched
       insert_row(event)
-      @rows_since_last_flush = @rows_since_last_flush + 1
       check_and_output.each do |sql_event|
+        # process the generated new event
         filter_matched(sql_event)
         yield sql_event
       end
+      # cancel the original event
       event.cancel
     else
       # Tag this event if we can't parse it. We can use this later to
@@ -217,25 +256,24 @@ class LogStash::Filters::Sqlstream < LogStash::Filters::Base
     @logger.debug? and @logger.debug("Event now: ", :event => event)
   end
 
-  def teardown
-    # Nothing to do by default.
+  # This is called by the pipeline engine every 5 seconds and also when shutting down.
+  public
+  def flush(options = {})
+    return check_and_output
   end
 
   ################################
   # SQLite support
   ################################
-  # private
-  # def group_rows(event)
-  #   if @output_groupby
-  #     p 321
-  #   end
-  # end
 
+  # generate the events which contains the new field,
+  # once the elapse time reach the time window or
+  # the input records reach the row window
   private
   def check_and_output
     if ready_for_output
       begin
-        return output
+        return query_and_new_events
       ensure
         # clean the table
         truncate
@@ -250,82 +288,84 @@ class LogStash::Filters::Sqlstream < LogStash::Filters::Base
 
   private
   def truncate
+    @logger.debug("delete the records in table #{SINCE_TABLE}")
     @table.delete
   end
 
   private
   def insert_row(event)
-    json_message = event.to_json
-    if @insert_select_cols.empty?
-      return json_message
-    end
+    event_text = event.to_json
+    json_event = JSON.parse(event_text)
 
-    json_event = JSON.parse(json_message)
+    # By default, the primary key and the event text will be stored in the database.
+    cols = {@table_primary_key.to_sym => @rows_since_last_flush, @internal_data_blob_col.to_sym => event_text}
 
-    cols = {:id => @rows_since_last_flush}
-    @insert_select_cols.each do |col|
+    # The column fields which should be stored in the database.
+    @table_column_names.each do |col|
       cols[col] = json_event[col]
     end
 
     begin
+      @logger.debug("Insert the records #{@table.insert_sql(cols)}.")
       @table.insert(cols)
+      @rows_since_last_flush = @rows_since_last_flush + 1
     rescue StandardError => e
-      @logger.error("Exception occured in executing insert.", e)
+      @logger.error("Exception occured in executing insert.", :exception => e)
     end
   end
 
   private
   def ready_for_output
-    return (ready_for_output_rows and ready_for_output_time)
+    return (ready_for_output_rows or ready_for_output_time)
   end
 
   private
   def ready_for_output_rows
-    if @rows_window.nil?
+    if @rows_window == 0
       return false
     end
 
+    @logger.debug("current rows: #{@rows_since_last_flush}, rows window: #{@rows_window}.")
     return @rows_since_last_flush >= @rows_window
   end
 
   private
   def ready_for_output_time
-    if @time_window_seconds.nil?
+    if @time_window_seconds == 0
       return false
     end
 
-    return (Time.now.to_i - @last_flush_sec) >= @time_window_seconds
-  end
-
-  # This is called by the pipeline engine every 5 seconds and also when shutting down.
-  private
-  def flush(options = {})
-    return check_and_output
+    elapse_time_seconds = Time.now.to_i - @last_flush_sec
+    @logger.debug("elapse time: #{elapse_time_seconds} sec, time window: #{@time_window_seconds} sec.")
+    return elapse_time_seconds >= @time_window_seconds
   end
 
   private
-  def output
-    results = []
-    output_select = @output_select.join(",")
-    output_query = "SELECT #{output_select} FROM #{SINCE_TABLE}"
-    if @output_groupby
-      output_query = output_query + " GROUP BY #{@output_groupby}"
+  def query_and_new_events
+    new_events = []
+    begin
+      ary = @db.fetch(@output_query).all
+      @logger.debug("Get #{ary.length} records with query \"#{@output_query}\".")
+    rescue StandardError => e
+      @logger.error("Exception occured in executing select. The query is \"#{@output_query}\".", :exception => e)
     end
-    ary = @db.fetch(output_query).all
+
     ary.each do |row|
-      event_json = row[0]
-      event_hash = JSON.parse(event_json)
-      event = LogStash::Event.new(event_hash)
-      new_field_hash = {}
-      next_col = 1
-      @output_columns_names.each do |output_col|
-        new_field_hash[output_col] = row[next_col]
-        next_col = next_col + 1
+      event_text = row[@internal_data_blob_col.to_sym]
+      event_json = JSON.parse(event_text)
+
+      # update the fields
+      @output_column_names.each do |col|
+        event_json[col] = row[col.to_sym]
       end
-      LogStash::Util::Decorators.add_fields(new_field_hash, event, "filters/#{self.class.name}")
-      results << event
+
+      event = LogStash::Event.new(event_json)
+
+      # LogStash::Util::Decorators.add_fields(new_field_hash, event, "filters/#{self.class.name}")
+      new_events << event
     end
-    return results
+
+    return new_events
   end
 
   ################################
@@ -344,7 +384,7 @@ class LogStash::Filters::Sqlstream < LogStash::Filters::Base
       return match_against_groks(groks, input, event)
     end
   rescue StandardError => e
-    @logger.warn("Grok regexp threw exception", :exception => e.message)
+    @logger.warn("match regexp threw exception", :exception => e.message)
   end
 
   private
@@ -384,7 +424,7 @@ class LogStash::Filters::Sqlstream < LogStash::Filters::Base
   def add_patterns_from_files(paths, grok)
     paths.each do |path|
       if !File.exists?(path)
-        raise "Grok pattern file does not exist: #{path}"
+        raise "pattern file does not exist: #{path}"
       end
       grok.add_patterns_from_file(path)
     end

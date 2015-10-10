@@ -1,55 +1,95 @@
-# Logstash Plugin
+# logstash-filter-sqlstream Plugin
 
 This is a plugin for [Logstash](https://github.com/elastic/logstash).
 
-It is fully free and fully open source. The license is Apache 2.0, meaning you are pretty much free to use it however you want in whatever way.
+It is owned by HoneycombData. If you have any question, you can contact `chcdlf@gmail.com`.
 
-## Documentation
+## Documents
 
-Logstash provides infrastructure to automatically generate documentation for this plugin. We use the asciidoc format to write documentation so any comments in the source code will be first converted into asciidoc and then into html. All plugin documentation are placed under one [central location](http://www.elastic.co/guide/en/logstash/current/).
+This filter is used for parse the input records to structured data and provide stream-sql support.
 
-- For formatting code or config example, you can use the asciidoc `[source,ruby]` directive
-- For more asciidoc formatting tips, see the excellent reference here https://github.com/elastic/docs#asciidoc-guide
+Firstly, it parses the records in the Grok way and generate several new fields which may be inserted in the database with lightweight local sql engine, e.g. SQLite3.
+Then, the filter will select the database according to the user-defined query.
+The records selected from the database finally generate new events and passed to the next component in Logstash.
+The generated event is based on the original event which has be serialized into the database in processing insert.
 
-## Need Help?
+When the query will group by several records (say m recs), and generate new events (say n events, m != n).
+The new event is based on the serialized data selected from database, which may be the latest one.
 
-Need help? Try #logstash on freenode IRC or the https://discuss.elastic.co/c/logstash discussion forum.
+We have three reserved words in the database, e.g.
 
-## Developing
+* %{INTERNAL_DATA_BLOB_COL} => the column which is used to store the serialized event
+* %{INTERNAL_TABLE} => the table name
+* %{INTERNAL_PRIMARY_KEY} =>
 
-### 1. Plugin Developement and Testing
+So, the simplest query should be like
 
-#### Code
-- To get started, you'll need JRuby with the Bundler gem installed.
+    "select %{INTERNAL_DATA_BLOB_COL} from %{INTERNAL_TABLE}"
 
-- Create a new plugin or clone and existing from the GitHub [logstash-plugins](https://github.com/logstash-plugins) organization. We also provide [example plugins](https://github.com/logstash-plugins?query=example).
+!!!When user define the self-query, the column field `%{INTERNAL_DATA_BLOB_COL}` should be remained. The query may looks like:
 
-- Install dependencies
-```sh
-bundle install
+    "select %{INTERNAL_DATA_BLOB_COL}, col1, col2 from %{INTERNAL_TABLE} where ... group by ..."
+
+## Usage
+
+Set the conf/shipper.conf like these below.
+
+```
+filter {
+    sqlstream {
+        # the match pattern which is as the same as grok
+        match => ... # hash (optional), default: {}
+        # when the database_path is not set, the SQLite3 will use in memory mode.
+        database_path => # string (optional), default: "/var/logs/logstash/sqlstream.db"
+        # one of the time_window_seconds and rows_window should be set
+        # if the value is 0, it means the disable this field
+        time_window_seconds => ... # number (required), default: 0
+        rows_window => ... # number (required), default: 5
+        # periodically check whether the query condition has been reached.
+        # if the time window is enable, the periodic flush will also be set as true.
+        periodic_flush => ... # boolean (optional), default: true
+        # the internal table column names
+        table_column_names => ... # array (required), default: []
+        # the output column names based on the query
+        output_column_names => ... # array (required), default: []
+        # the query
+        output_query => ... # string (required), default: "select %{INTERNAL_DATA_BLOB_COL} from %{INTERNAL_TABLE}"
+    }
+}
 ```
 
-#### Test
+```
+filter {
+    sqlstream {
 
-- Update your dependencies
+        match => {
+            "message" => "%{ip:client} %{word:method} %{uripathparam:request} %{number:bytes} %{number:duration}"
+        }
 
-```sh
-bundle install
+        database_path => "/var/log/logstash/sqlstream.db"
+
+        time_window_seconds => 10
+        rows_window => 3
+
+        periodic_flush => true
+        table_column_names => ["client", "method", "request", "bytes", "duration"]
+
+#       output_column_names => ["client", "method", "duration"]
+#       output_query => "select %{INTERNAL_DATA_BLOB_COL}, client, method, duration from %{INTERNAL_TABLE} where %{INTERNAL_PRIMARY_KEY} = 0"
+
+        output_column_names => ["NumberOfMethod"]
+        output_query => "select %{INTERNAL_DATA_BLOB_COL}, count(method) as NumberOfMethod from %{INTERNAL_TABLE} group by client"
+    }
+}
 ```
 
-- Run tests
+## Running logstash-filter-sqlstream
 
-```sh
-bundle exec rspec
-```
-
-### 2. Running your unpublished Plugin in Logstash
-
-#### 2.1 Run in a local Logstash clone
+### 1 Run in a local Logstash clone
 
 - Edit Logstash `Gemfile` and add the local plugin path, for example:
 ```ruby
-gem "logstash-filter-awesome", :path => "/your/local/logstash-filter-awesome"
+gem "logstash-filter-sqlstream", :path => "/your/local/logstash-filter-sqlstream"
 ```
 - Install plugin
 ```sh
@@ -57,30 +97,21 @@ bin/plugin install --no-verify
 ```
 - Run Logstash with your plugin
 ```sh
-bin/logstash -e 'filter {awesome {}}'
+bin/logstash -e 'filter {sqlstream {}}'
 ```
 At this point any modifications to the plugin code will be applied to this local Logstash setup. After modifying the plugin, simply rerun Logstash.
 
-#### 2.2 Run in an installed Logstash
+### 2 Run in an installed Logstash
 
 You can use the same **2.1** method to run your plugin in an installed Logstash by editing its `Gemfile` and pointing the `:path` to your local plugin development directory or you can build the gem and install it using:
 
 - Build your plugin gem
 ```sh
-gem build logstash-filter-awesome.gemspec
+gem build logstash-filter-sqlstream.gemspec
 ```
 - Install the plugin from the Logstash home
 ```sh
-bin/plugin install /your/local/plugin/logstash-filter-awesome.gem
+bin/plugin install /your/local/plugin/logstash-filter-sqlstream.gem
 ```
 - Start Logstash and proceed to test the plugin
 
-## Contributing
-
-All contributions are welcome: ideas, patches, documentation, bug reports, complaints, and even something you drew up on a napkin.
-
-Programming is not a required skill. Whatever you've seen about open source and maintainers or community members  saying "send patches or die" - you will not see that here.
-
-It is more important to the community that you are able to contribute.
-
-For more information about contributing, see the [CONTRIBUTING](https://github.com/elastic/logstash/blob/master/CONTRIBUTING.md) file.
